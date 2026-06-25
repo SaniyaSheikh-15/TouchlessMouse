@@ -1,17 +1,16 @@
 import numpy as np
+import math
+import cv2
 from utils import draw_bar
 
 # ===================== VOLUME SETUP =====================
-volume_control  = None
-vol_min         = -65.25
-vol_max         = 0.0
+volume_control   = None
+vol_min, vol_max = -65.25, 0.0
 volume_available = False
 
 try:
     from pycaw.pycaw import AudioUtilities, IAudioEndpointVolume
-    from ctypes import cast, POINTER
-    from comtypes import CLSCTX_ALL
-
+    from comtypes import CLSCTX_ALL, cast, POINTER
     devices          = AudioUtilities.GetSpeakers()
     interface        = devices.Activate(IAudioEndpointVolume._iid_, CLSCTX_ALL, None)
     volume_control   = cast(interface, POINTER(IAudioEndpointVolume))
@@ -22,25 +21,28 @@ except Exception as e:
     print(f"⚠ Volume control unavailable: {e}")
 
 # ===================== VOLUME CONTROL =====================
-def adjust_volume(direction):
+def handle_volume(lmList, img):
     """
-    Adjust system volume incrementally.
-    direction: +1 = louder, -1 = quieter
+    Volume control using Left Hand — Thumb (4) + Index (8) distance.
+    Wider gap = louder, closer = quieter.
+    Returns status string.
     """
     if not volume_available:
-        return
-    current = volume_control.GetMasterVolumeLevel()
-    new_vol = current + (1.5 * direction)
-    new_vol = max(vol_min, min(vol_max, new_vol))
-    volume_control.SetMasterVolumeLevel(new_vol, None)
+        return ""
 
-def get_volume_percent():
-    """Returns current volume as 0–100 integer."""
-    if not volume_available:
-        return 0
-    current = volume_control.GetMasterVolumeLevel()
-    return int(np.interp(current, [vol_min, vol_max], [0, 100]))
+    thumb_x,  thumb_y  = lmList[4][1],  lmList[4][2]
+    index_x,  index_y  = lmList[8][1],  lmList[8][2]
 
-def draw_volume_bar(img, vol_pct):
-    """Draw volume bar on frame."""
+    length = math.hypot(thumb_x - index_x, thumb_y - index_y)
+    vol    = np.interp(length, [20, 200], [vol_min, vol_max])
+    vol    = max(vol_min, min(vol_max, vol))
+    volume_control.SetMasterVolumeLevel(vol, None)
+
+    vol_pct = int(np.interp(length, [20, 200], [0, 100]))
+    vol_pct = max(0, min(100, vol_pct))
+
+    # Draw line between thumb and index
+    cv2.line(img, (thumb_x, thumb_y), (index_x, index_y), (100, 255, 100), 2)
     draw_bar(img, vol_pct, 40, 300, 22, 200, (100, 255, 100), "Vol")
+
+    return f"Volume {vol_pct}%"
