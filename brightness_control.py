@@ -1,43 +1,52 @@
+import cv2
 from utils import draw_bar
 
 # ===================== BRIGHTNESS SETUP =====================
 brightness_available = False
-current_brightness   = 50   # tracked internally for incremental control
 
 try:
-    from screen_brightness_control import set_brightness as _set_brightness
+    import screen_brightness_control as sbc
     brightness_available = True
     print("✅ Brightness control ready.")
 except Exception:
-    print("⚠ Brightness control unavailable on this display (external monitor or unsupported).")
+    print("⚠ Brightness control unavailable (external monitor or unsupported).")
 
 # ===================== BRIGHTNESS CONTROL =====================
-def adjust_brightness(direction):
+def handle_brightness(lmList, img):
     """
-    Adjust screen brightness incrementally.
-    direction: +1 = brighter, -1 = dimmer
-    Returns updated brightness value.
+    Brightness control using Left Hand finger positions:
+    - Middle finger (12) DOWN + Ring finger (16) UP  → Brightness Down
+    - Ring finger (16) DOWN + Middle finger (12) UP  → Brightness Up
+    - Otherwise → Hold (no change)
+    Returns status string.
     """
-    global current_brightness, brightness_available
-
     if not brightness_available:
-        return current_brightness
+        return ""
 
-    step = 5
-    current_brightness = max(0, min(100, current_brightness + (step * direction)))
+    index_y  = lmList[8][2]
+    middle_y = lmList[12][2]
+    ring_y   = lmList[16][2]
 
+    status = ""
     try:
-        _set_brightness(current_brightness)
+        current = sbc.get_brightness(display=0)[0]
+
+        if middle_y > index_y and ring_y < index_y:
+            # Middle below index, ring above index = Brightness Down
+            sbc.set_brightness(max(0, current - 2))
+            status = "Brightness Down 🌙"
+
+        elif ring_y > index_y and middle_y < index_y:
+            # Ring below index, middle above index = Brightness Up
+            sbc.set_brightness(min(100, current + 2))
+            status = "Brightness Up ☀"
+
+        else:
+            status = "Brightness Hold"
+
+        draw_bar(img, current, 80, 300, 22, 200, (0, 220, 255), "Bri")
+
     except Exception:
-        brightness_available = False
-        print("⚠ Brightness control failed — disabling.")
+        pass
 
-    return current_brightness
-
-def get_brightness():
-    """Returns current tracked brightness level."""
-    return current_brightness
-
-def draw_brightness_bar(img, bri_pct):
-    """Draw brightness bar on frame."""
-    draw_bar(img, bri_pct, 80, 300, 22, 200, (0, 220, 255), "Bri")
+    return status
