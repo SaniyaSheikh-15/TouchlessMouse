@@ -3,84 +3,91 @@ import numpy as np
 import pygame
 import os
 import cv2
+import time
 
 # ===================== CONFIG =====================
 pyautogui.FAILSAFE = False
 
-SMOOTHING         = 0.18   # 0 = no movement, 1 = no smoothing
-DEAD_ZONE         = 8      # pixels — ignore micro-tremors below this
-LEFT_CLICK_THRESH  = 45    # pinch distance in camera pixels
-RIGHT_CLICK_THRESH = 45
-SCROLL_THRESH      = 45
-SCROLL_AMOUNT      = 20
-CLICK_COOLDOWN     = 0.8   # seconds between clicks
-GESTURE_HOLD       = 0.3   # seconds before gesture resets to idle
-scroll_cooldown    = 0.08  # seconds between scroll ticks
+# Cursor mapping region (camera pixels)
+CAM_X_RANGE   = (100, 540)
+CAM_Y_RANGE   = (100, 380)
+
+# Click threshold (pixel distance between landmarks)
+CLICK_THRESH   = 40
+
+# Click cooldown to avoid repeated triggers
+CLICK_COOLDOWN = 0.8
+_last_click_time = 0
 
 # ===================== SOUND =====================
 pygame.mixer.init()
 _click_sound = None
-_sound_file  = "click.mp3"
-
-if os.path.exists(_sound_file):
-    _click_sound = pygame.mixer.Sound(_sound_file)
+if os.path.exists("click.mp3"):
+    _click_sound = pygame.mixer.Sound("click.mp3")
 else:
-    print("⚠ click.mp3 not found — running without click sound.")
+    print("⚠ click.mp3 not found — running without sound.")
 
-def play_click_sound():
+def _play_click():
     if _click_sound:
         _click_sound.play()
 
-# ===================== STATE =====================
+# ===================== SCREEN =====================
 screen_w, screen_h = pyautogui.size()
-smooth_x  = screen_w // 2
-smooth_y  = screen_h // 2
 
-# ===================== MOUSE MOVEMENT =====================
-def move_cursor(lm, img_w, img_h):
-    """
-    Move cursor smoothly using index finger tip (landmark 8).
-    Applies exponential smoothing + dead zone filtering.
-    Returns (smooth_x, smooth_y) for external use.
-    """
-    global smooth_x, smooth_y
-
-    index_x, index_y = lm[8]
-
-    # Map camera space → screen space (40px border margin)
-    raw_x = np.interp(index_x, [40, img_w - 40], [0, screen_w])
-    raw_y = np.interp(index_y, [40, img_h - 40], [0, screen_h])
-
-    delta_x = raw_x - smooth_x
-    delta_y = raw_y - smooth_y
-
-    # Only move if beyond dead zone
-    if abs(delta_x) > DEAD_ZONE or abs(delta_y) > DEAD_ZONE:
-        smooth_x += SMOOTHING * delta_x
-        smooth_y += SMOOTHING * delta_y
-        pyautogui.moveTo(int(smooth_x), int(smooth_y))
-
-    # Draw yellow dot on index tip
-    return smooth_x, smooth_y
+# ===================== CURSOR MOVEMENT =====================
+def move_cursor(lmList):
+    """Move cursor using index finger tip (landmark 8)."""
+    index_x = lmList[8][1]
+    index_y = lmList[8][2]
+    screen_x = np.interp(index_x, CAM_X_RANGE, (0, screen_w))
+    screen_y = np.interp(index_y, CAM_Y_RANGE, (0, screen_h))
+    pyautogui.moveTo(screen_x, screen_y, duration=0.05)
 
 # ===================== CLICKS =====================
-def do_left_click():
-    pyautogui.click()
-    play_click_sound()
+def check_left_click(lmList):
+    """Left Click: Thumb (4) + Ring finger (16) pinch."""
+    global _last_click_time
+    thumb_x, thumb_y   = lmList[4][1],  lmList[4][2]
+    ring_x,  ring_y    = lmList[16][1], lmList[16][2]
+    if np.hypot(thumb_x - ring_x, thumb_y - ring_y) < CLICK_THRESH:
+        if time.time() - _last_click_time > CLICK_COOLDOWN:
+            pyautogui.click()
+            _play_click()
+            _last_click_time = time.time()
+            return True
+    return False
 
-def do_right_click():
-    pyautogui.rightClick()
-    play_click_sound()
+def check_right_click(lmList):
+    """Right Click: Thumb (4) + Middle finger (12) pinch."""
+    global _last_click_time
+    thumb_x,  thumb_y  = lmList[4][1],  lmList[4][2]
+    middle_x, middle_y = lmList[12][1], lmList[12][2]
+    if np.hypot(thumb_x - middle_x, thumb_y - middle_y) < CLICK_THRESH:
+        if time.time() - _last_click_time > CLICK_COOLDOWN:
+            pyautogui.rightClick()
+            _play_click()
+            _last_click_time = time.time()
+            return True
+    return False
 
 # ===================== SCROLL =====================
-def do_scroll(direction):
-    """
-    direction: +1 = scroll up, -1 = scroll down
-    """
-    pyautogui.scroll(direction * SCROLL_AMOUNT)
+_prev_middle_y = 0
+
+def check_scroll(lmList):
+    """Scroll using middle finger (12) vertical movement."""
+    global _prev_middle_y
+    middle_y = lmList[12][2]
+    status   = None
+    if _prev_middle_y != 0:
+        diff_y = middle_y - _prev_middle_y
+        if abs(diff_y) > 2:   # ignore tiny jitter
+            pyautogui.scroll(int(-diff_y * 2))
+            status = "SCROLL DOWN ↓" if diff_y > 0 else "SCROLL UP ↑"
+    _prev_middle_y = middle_y
+    return status
 
 # ===================== HUD =====================
-def draw_cursor_dot(img, lm):
-    """Draw a dot on the index fingertip for visual feedback."""
-    index_x, index_y = lm[8]
-    cv2.circle(img, (index_x, index_y), 8, (0, 255, 255), -1)
+def draw_cursor_dot(img, lmList):
+    """Draw dot on index fingertip."""
+    cx, cy = lmList[8][1], lmList[8][2]
+    cv2.circle(img, (cx, cy), 8, (0, 255, 255), -1)
