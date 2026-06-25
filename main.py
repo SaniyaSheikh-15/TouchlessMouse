@@ -1,159 +1,88 @@
 import cv2
-import mediapipe as mp
-import time
+import os
+import logging
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
+logging.getLogger('tensorflow').setLevel(logging.FATAL)
 
-# ── Import all modules ──
-from utils             import build_landmark_list
-from gestures          import detect_right_gesture, detect_left_gesture
-from mouse_control     import (move_cursor, do_left_click, do_right_click,
-                                do_scroll, draw_cursor_dot,
-                                CLICK_COOLDOWN, RIGHT_CLICK_THRESH,
-                                LEFT_CLICK_THRESH, SCROLL_AMOUNT,
-                                GESTURE_HOLD, scroll_cooldown)
-from volume_control    import adjust_volume, get_volume_percent, draw_volume_bar
-from brightness_control import adjust_brightness, get_brightness, draw_brightness_bar
+from hand_detector      import HandDetector
+from mouse_control      import move_cursor, check_left_click, check_right_click, check_scroll, draw_cursor_dot
+from volume_control     import handle_volume
+from brightness_control import handle_brightness
 
-# ===================== CAMERA & MEDIAPIPE =====================
-cap      = cv2.VideoCapture(0)
-mp_hands = mp.solutions.hands
-hands    = mp_hands.Hands(
-    max_num_hands=2,
-    min_detection_confidence=0.75,
-    min_tracking_confidence=0.75
-)
-draw = mp.solutions.drawing_utils
+# ===================== CAMERA SETUP =====================
+cap = cv2.VideoCapture(0)
+cap.set(3, 640)
+cap.set(4, 480)
 
-# ===================== STATE =====================
-last_click_time      = 0
-last_scroll_time     = 0
-last_brightness_time = 0
-BRIGHTNESS_COOLDOWN  = 0.15
+detector = HandDetector(maxHands=2, detectionCon=0.7, trackCon=0.7)
 
-gesture_state        = "idle"
-gesture_reset_time   = 0
-
-prev_two_finger_y    = 0
-prev_three_finger_y  = 0
-
-# ===================== MAIN LOOP =====================
-print("✅ Touchless System Running — Press Q to quit")
+# ===================== STARTUP MESSAGE =====================
+print("✅ Touchless System Running — Press ESC to quit")
 print("─" * 55)
 print("RIGHT HAND:")
-print("  ☝  Index finger        → Move cursor")
-print("  🤏 Thumb + Index        → Left Click")
-print("  🤏 Thumb + Middle       → Right Click")
-print("  ✌  Two fingers swipe ↑  → Scroll Up")
-print("  ✌  Two fingers swipe ↓  → Scroll Down")
+print("  ☝  Index finger          → Move cursor")
+print("  👍 Thumb + Ring finger    → Left Click")
+print("  👍 Thumb + Middle finger  → Right Click")
+print("  ✌  Middle finger move     → Scroll")
 print("LEFT HAND:")
-print("  🤟 Three fingers swipe ↑ → Volume Up")
-print("  🤟 Three fingers swipe ↓ → Volume Down")
-print("  👍 Fist + Thumb Up       → Brightness Up")
-print("  👎 Fist + Thumb Down     → Brightness Down")
+print("  🤏 Thumb + Index spread   → Volume control")
+print("  💡 Middle down, Ring up   → Brightness Down")
+print("  💡 Ring down, Middle up   → Brightness Up")
 print("─" * 55)
 
+# ===================== MAIN LOOP =====================
 while True:
     success, img = cap.read()
     if not success:
         continue
 
-    img   = cv2.flip(img, 1)
-    img_h, img_w = img.shape[:2]
-    rgb   = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-    results = hands.process(rgb)
+    img = cv2.flip(img, 1)
+    img = detector.findHands(img)
 
     status_right = ""
     status_left  = ""
-    now          = time.time()
 
     try:
-        if results.multi_hand_landmarks and results.multi_handedness:
-            for hand_idx, hand_landmarks in enumerate(results.multi_hand_landmarks):
-                hand_label = results.multi_handedness[hand_idx].classification[0].label
-                draw.draw_landmarks(img, hand_landmarks, mp_hands.HAND_CONNECTIONS)
+        for hand_no in range(detector.handCount()):
+            handType = detector.getHandType(hand_no)
+            lmList   = detector.findPosition(img, hand_no)
 
-                lm = build_landmark_list(hand_landmarks, img_w, img_h)
+            if not lmList or len(lmList) < 17:
+                continue
 
-                # ─────────────────────────────────────
-                # RIGHT HAND — Mouse Control
-                # ─────────────────────────────────────
-                if hand_label == "Right":
-                    move_cursor(lm, img_w, img_h)
-                    draw_cursor_dot(img, lm)
+            # ─────────────────────────────────────
+            # RIGHT HAND — Mouse Control
+            # ─────────────────────────────────────
+            if handType == "Right":
+                move_cursor(lmList)
+                draw_cursor_dot(img, lmList)
 
-                    gesture, scroll_dir, prev_two_finger_y = detect_right_gesture(
-                        lm, gesture_state, gesture_reset_time,
-                        last_click_time, last_scroll_time,
-                        prev_two_finger_y, now,
-                        LEFT_CLICK_THRESH, RIGHT_CLICK_THRESH,
-                        SCROLL_AMOUNT, CLICK_COOLDOWN,
-                        GESTURE_HOLD, scroll_cooldown
-                    )
+                if check_left_click(lmList):
+                    status_right = "LEFT CLICK"
+                elif check_right_click(lmList):
+                    status_right = "RIGHT CLICK"
+                else:
+                    scroll_status = check_scroll(lmList)
+                    if scroll_status:
+                        status_right = scroll_status
 
-                    if gesture == "left_click":
-                        do_left_click()
-                        last_click_time    = now
-                        gesture_state      = "left_click"
-                        gesture_reset_time = now
-                        status_right       = "LEFT CLICK"
-
-                    elif gesture == "right_click":
-                        do_right_click()
-                        last_click_time    = now
-                        gesture_state      = "right_click"
-                        gesture_reset_time = now
-                        status_right       = "RIGHT CLICK"
-
-                    elif gesture in ("scroll_up", "scroll_down"):
-                        do_scroll(scroll_dir)
-                        last_scroll_time = now
-                        status_right     = "SCROLL UP ↑" if scroll_dir > 0 else "SCROLL DOWN ↓"
-
-                    elif gesture_state != "idle":
-                        status_right = gesture_state.replace("_", " ").upper()
-
-                    # Reset gesture state after hold period
-                    if gesture_state != "idle" and now - gesture_reset_time > GESTURE_HOLD:
-                        gesture_state = "idle"
-
-                # ─────────────────────────────────────
-                # LEFT HAND — Volume + Brightness
-                # ─────────────────────────────────────
-                elif hand_label == "Left":
-                    gesture, vol_dir, bri_dir, prev_three_finger_y = detect_left_gesture(
-                        lm, now, last_scroll_time, last_brightness_time,
-                        prev_three_finger_y, scroll_cooldown, BRIGHTNESS_COOLDOWN
-                    )
-
-                    if gesture == "volume" and vol_dir != 0:
-                        adjust_volume(vol_dir)
-                        last_scroll_time = now
-                        vol_pct          = get_volume_percent()
-                        draw_volume_bar(img, vol_pct)
-                        status_left = f"Volume {'Up ↑' if vol_dir > 0 else 'Down ↓'} {vol_pct}%"
-
-                    elif gesture == "brightness" and bri_dir != 0:
-                        bri_pct = adjust_brightness(bri_dir)
-                        last_brightness_time = now
-                        draw_brightness_bar(img, bri_pct)
-                        status_left = f"Brightness {'Up ☀' if bri_dir > 0 else 'Down 🌙'} {bri_pct}%"
-
-                    # Show bars even when not actively changing
-                    elif gesture == "volume":
-                        draw_volume_bar(img, get_volume_percent())
-                    elif gesture == "brightness":
-                        draw_brightness_bar(img, get_brightness())
-
-        else:
-            cv2.putText(img, "Place hand in view", (img_w // 2 - 130, 50),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 80, 255), 2)
+            # ─────────────────────────────────────
+            # LEFT HAND — Volume + Brightness
+            # ─────────────────────────────────────
+            elif handType == "Left":
+                vol_status = handle_volume(lmList, img)
+                bri_status = handle_brightness(lmList, img)
+                status_left = vol_status or bri_status
 
     except Exception as e:
         print(f"Runtime error: {e}")
 
-    # ── HUD OVERLAY ──
+    # ── HUD ──
+    img_h, img_w = img.shape[:2]
+
     if status_right:
         color = (0, 255, 150) if "CLICK" in status_right else (255, 220, 0)
-        cv2.putText(img, f"R: {status_right}", (img_w - 320, 40),
+        cv2.putText(img, f"R: {status_right}", (img_w - 300, 40),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.75, color, 2)
 
     if status_left:
@@ -163,12 +92,12 @@ while True:
     # Instructions strip
     cv2.rectangle(img, (0, img_h - 35), (img_w, img_h), (30, 30, 30), -1)
     cv2.putText(img,
-        "R: Idx=Move | T+I=LClick | T+M=RClick | 2Swipe=Scroll  |  L: 3Swipe=Vol | Fist+Thumb=Bri",
-        (10, img_h - 12), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (200, 200, 200), 1)
+        "R: Idx=Move | T+Ring=LClick | T+Mid=RClick | Mid Move=Scroll  |  L: T+Idx=Vol | Mid/Ring=Bri",
+        (10, img_h - 12), cv2.FONT_HERSHEY_SIMPLEX, 0.38, (200, 200, 200), 1)
 
     cv2.imshow("Touchless System Control", img)
 
-    if cv2.waitKey(1) == ord('q'):
+    if cv2.waitKey(1) & 0xFF == 27:   # ESC to quit
         break
 
 cap.release()
